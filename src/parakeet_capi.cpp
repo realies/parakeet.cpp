@@ -440,6 +440,34 @@ extern "C" void parakeet_capi_free(parakeet_ctx* ctx) {
     delete ctx;  // safe on nullptr; ~unique_ptr releases the model.
 }
 
+extern "C" int parakeet_capi_vocab_size(const parakeet_ctx* ctx) {
+    return ctx && ctx->model ? (int)ctx->model->config().vocab_size : 0;
+}
+
+extern "C" const char* parakeet_capi_token_piece(const parakeet_ctx* ctx, int id) {
+    if (!ctx || !ctx->model || id < 0 || (uint32_t)id > ctx->model->config().vocab_size) return nullptr;
+    if ((uint32_t)id == ctx->model->config().blank_id) return "";
+    const auto& pieces = ctx->model->loader().tokenizer_pieces();
+    return (size_t)id < pieces.size() ? pieces[(size_t)id].c_str() : nullptr;
+}
+
+extern "C" int parakeet_capi_set_allowed_tokens(parakeet_ctx* ctx,
+                                               const int32_t* ids, int n) {
+    if (!ctx) return 1;
+    if (!ctx->model) { ctx->last_error = "allowed tokens require an offline TDT ASR context"; return 1; }
+    try {
+        ctx->model->set_allowed_tokens(ids, n);
+        ctx->last_error.clear();
+        return 0;
+    } catch (const std::exception& e) {
+        ctx->last_error = e.what();
+        return 1;
+    } catch (...) {
+        ctx->last_error = "unknown error";
+        return 1;
+    }
+}
+
 extern "C" char* parakeet_capi_transcribe_path_lang(parakeet_ctx* ctx,
                                                     const char* wav_path, int decoder,
                                                     const char* target_lang) {

@@ -9,6 +9,8 @@ namespace pk {
 // durations empty -> RNNT (advance-by-1); non-empty -> TDT (advance-by-duration).
 // Outputs per item: ids[n], and (if toks != nullptr) TokenInfo[n]. Applies the
 // same per-item decision rule as rnnt_greedy / tdt_greedy.
+// `allowed_tokens` is the optional vocab+1 token mask used by tdt_greedy;
+// blank is always allowed, and duration logits are unaffected.
 //
 // On the CPU backend the result is bit-identical to per-item decode (logits,
 // token ids, frames, spans and confidences): the prediction step and the joint
@@ -25,5 +27,6 @@ void transducer_greedy_batch(
     const std::vector<int32_t>& durations, // empty=RNNT
     int blank_id, int max_symbols,
     std::vector<std::vector<int32_t>>& ids,            // OUT [N][.]
-    std::vector<std::vector<TokenInfo>>* toks);         // OUT [N][.] or nullptr
+    std::vector<std::vector<TokenInfo>>* toks,          // OUT [N][.] or nullptr
+    const std::vector<uint8_t>& allowed_tokens = {});
 } // namespace pk

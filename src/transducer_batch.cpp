@@ -31,7 +31,8 @@ void transducer_greedy_batch(
     const std::vector<int32_t>& durations,
     int blank_id, int max_symbols,
     std::vector<std::vector<int32_t>>& ids,
-    std::vector<std::vector<TokenInfo>>* toks) {
+    std::vector<std::vector<TokenInfo>>* toks,
+    const std::vector<uint8_t>& allowed_tokens) {
 
     const bool is_tdt = !durations.empty();
     const int N = (int)encs.size();
@@ -47,6 +48,8 @@ void transducer_greedy_batch(
     //   tdt.cpp  token_count = V_plus - num_dur
     //   rnnt.cpp token_count = V_plus
     const int token_count = is_tdt ? (Vp - num_dur) : Vp;
+    assert(allowed_tokens.empty() || (int)allowed_tokens.size() == token_count);
+    const uint8_t* allowed = allowed_tokens.empty() ? nullptr : allowed_tokens.data();
 
     // Per-item precomputed encoder projection [T[n], Hj].
     std::vector<std::vector<float>> ep(N);
@@ -151,7 +154,7 @@ void transducer_greedy_batch(
         for (int n = 0; n < N; ++n) {
             if (!active[n]) continue;
             const float* lz = logits.data() + (size_t)n * Vp;
-            const int k = decode_argmax(lz, token_count);
+            const int k = decode_argmax(lz, token_count, allowed);
 
             if (is_tdt) {
                 // --- tdt.cpp inner iteration ---
@@ -161,7 +164,7 @@ void transducer_greedy_batch(
                 if (k != blank_id) {
                     ids[n].push_back((int32_t)k);
                     if (toks) {
-                        const float conf = decode_max_prob_conf(lz, token_count, k);
+                        const float conf = decode_max_prob_conf(lz, token_count, k, allowed);
                         (*toks)[n].push_back(TokenInfo{ (int32_t)k, (int32_t)t[n], conf,
                                                         (int32_t)skip });
                     }
@@ -193,7 +196,7 @@ void transducer_greedy_batch(
                 } else {
                     ids[n].push_back((int32_t)k);
                     if (toks) {
-                        const float conf = decode_max_prob_conf(lz, token_count, k);
+                        const float conf = decode_max_prob_conf(lz, token_count, k, allowed);
                         (*toks)[n].push_back(TokenInfo{ (int32_t)k, (int32_t)t[n], conf, 1 });
                     }
                     last_token[n] = (int32_t)k;

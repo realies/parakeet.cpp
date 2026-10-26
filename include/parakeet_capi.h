@@ -1,6 +1,8 @@
 #ifndef PARAKEET_CAPI_H
 #define PARAKEET_CAPI_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -81,6 +83,8 @@ typedef struct parakeet_ctx parakeet_ctx;
 // Speaker embedding output (parakeet_capi_speaker_embed_pcm, parakeet_capi_free_floats)
 //      is additive and keeps ABI v10: a caller that needs them checks for the symbols
 //      (dlsym).
+// Allowed tokens (parakeet_capi_set_allowed_tokens, parakeet_capi_vocab_size,
+//      parakeet_capi_token_piece) is additive and keeps ABI v10; check symbols.
 int parakeet_capi_abi_version(void);
 
 // Load a GGUF model. Returns an owning context, or NULL on failure.
@@ -120,6 +124,31 @@ const char* parakeet_capi_load_error(void);
 
 // Free a context obtained from parakeet_capi_load. Safe on NULL.
 void parakeet_capi_free(parakeet_ctx* ctx);
+
+// Number of non-blank token pieces of an ASR model; the blank id equals this
+// size. Returns 0 for NULL or a non-ASR context. No last_error change.
+int parakeet_capi_vocab_size(const parakeet_ctx* ctx);
+
+// UTF-8 tokenizer piece for id in [0, vocab_size); blank (id == vocab_size)
+// returns "". Borrowed, valid for the context's life; do not free. Returns NULL
+// for an invalid id, NULL or non-ASR context. No last_error change. Safe to read
+// concurrently with transcription; the context must outlive every reader.
+const char* parakeet_capi_token_piece(const parakeet_ctx* ctx, int id);
+
+// Restrict offline TDT greedy decoding to the given token ids. Blank is always
+// allowed and duration logits are untouched. Applies to every greedy TDT path
+// on this context (text/JSON, single/batch, with or without VAD, and _lang).
+// Confidence uses the masked token distribution. The set is copied and stays
+// until replaced; ids == NULL or n == 0 clears it. Duplicate ids are accepted.
+// Returns 0 on success, nonzero on error (last_error set if ctx is non-NULL).
+// n < 0 or an id outside [0, vocab_size] is an error; the old set is retained.
+// Requires an offline TDT ASR context (including hybrid TDT-CTC); other model
+// kinds, CTC/RNNT-only and streaming models are refused, even when clearing.
+// While a set is active, requesting CTC (including raw CTC logits) or TDT beam
+// search fails with last_error instead of ignoring the set. Clear it first.
+// Like set_concurrency, call while no request is running. Concurrent transcribe
+// calls may share the configured set; last_error follows the rules below.
+int parakeet_capi_set_allowed_tokens(parakeet_ctx* ctx, const int32_t* ids, int n);
 
 // Transcribe a WAV file. `decoder` selects the head:
 //   0 = default (by arch: transducer for tdt/rnnt/hybrid, CTC for ctc),
