@@ -457,6 +457,10 @@ int main() {
         parakeet_ctx* d = parakeet_capi_load_component(B.c_str(), "vad");
         CHECK(d && parakeet_capi_model_kind(d) == PARAKEET_MODEL_KIND_VAD);
         if (c && p && d) {
+            CHECK(parakeet_capi_vocab_size(c) == 0);
+            CHECK(parakeet_capi_token_piece(c, 0) == nullptr);
+            CHECK(parakeet_capi_set_allowed_tokens(c, nullptr, 0) != 0);
+            CHECK(std::strlen(parakeet_capi_last_error(c)) > 0);
             const std::vector<float> pcm = noise(16000 * 3, 5);
             const char* opt = "{\"probabilities\":true}";
             const std::string jp = take(parakeet_capi_vad_pcm_json(p, pcm.data(), (int)pcm.size(), 16000, opt));
@@ -471,6 +475,13 @@ int main() {
         // component (the stand-in has the keys the loader needs, so it opens).
         parakeet_ctx* a = parakeet_capi_load(B.c_str());
         CHECK(a && parakeet_capi_model_kind(a) == PARAKEET_MODEL_KIND_ASR);
+        if (a) {
+            CHECK(parakeet_capi_vocab_size(a) == 5);
+            CHECK(std::strcmp(parakeet_capi_token_piece(a, 5), "") == 0);
+            // This stand-in has no TDT duration table, so masking is refused.
+            CHECK(parakeet_capi_set_allowed_tokens(a, nullptr, 0) != 0);
+            CHECK(std::strlen(parakeet_capi_last_error(a)) > 0);
+        }
         parakeet_capi_free(a);
         // ambiguous bundle
         CHECK(parakeet_capi_load(B2.c_str()) == nullptr);

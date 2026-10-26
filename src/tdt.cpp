@@ -12,7 +12,8 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 const std::vector<float>& enc, int T, int enc_hidden,
                                 const std::vector<int32_t>& durations,
                                 int blank_id, int max_symbols,
-                                std::vector<TokenInfo>* tokens) {
+                                std::vector<TokenInfo>* tokens,
+                                const std::vector<uint8_t>& allowed_tokens) {
     assert((int)enc.size() == (size_t)T * enc_hidden);
     assert(!durations.empty());
 
@@ -21,6 +22,8 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
     const int token_count  = V_plus - num_dur;   // vocab + 1 (incl. blank) = 1025
     assert(token_count == joint.vocab_size() + 1);
     assert(num_dur == joint.num_durations());
+    assert(allowed_tokens.empty() || (int)allowed_tokens.size() == token_count);
+    const uint8_t* allowed = allowed_tokens.empty() ? nullptr : allowed_tokens.data();
 
     std::vector<int32_t> hyp;
     if (tokens) tokens->clear();
@@ -78,7 +81,7 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                               g.data(), (int)g.size(), logits);
 
             // Split: token logits [0, token_count), duration logits [token_count, V_plus).
-            const int k   = decode_argmax(logits.data(), token_count);
+            const int k   = decode_argmax(logits.data(), token_count, allowed);
             const int d_k = decode_argmax(logits.data() + token_count, num_dur);
             skip = durations[d_k];
 
@@ -93,7 +96,7 @@ std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                     //           (NeMo log_softmaxes that slice; exclude the duration
                     //           logits). N = token_count = vocab + 1.
                     //   span  = durations[d_k] (the duration/skip applied to the token).
-                    const float conf = decode_max_prob_conf(logits.data(), token_count, k);
+                    const float conf = decode_max_prob_conf(logits.data(), token_count, k, allowed);
                     tokens->push_back(TokenInfo{ (int32_t)k, (int32_t)t, conf,
                                                  (int32_t)skip });
                 }

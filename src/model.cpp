@@ -44,6 +44,35 @@ bool arch_prefers_tdt(const std::string& arch) {
 }
 } // namespace
 
+void Model::set_allowed_tokens(const int32_t* ids, int n) {
+    if (n < 0) throw std::invalid_argument("allowed tokens: n must be non-negative");
+    const ParakeetConfig& cfg = config();
+    if (cfg.tdt_durations.empty() || cfg.streaming.present || cfg.blank_id != cfg.vocab_size)
+        throw std::invalid_argument("allowed tokens require an offline TDT model");
+
+    std::vector<uint8_t> allowed;
+    if (ids && n > 0) {
+        allowed.assign((size_t)cfg.vocab_size + 1, 0);
+        for (int i = 0; i < n; ++i) {
+            if (ids[i] < 0 || (uint32_t)ids[i] > cfg.vocab_size)
+                throw std::invalid_argument("allowed tokens: token id out of range");
+            allowed[(size_t)ids[i]] = 1;
+        }
+        allowed[cfg.blank_id] = 1;
+    }
+    std::lock_guard<std::mutex> lk(allowed_tokens_mu_);
+    allowed_tokens_ = std::move(allowed);
+}
+
+std::vector<uint8_t> Model::allowed_tokens_snapshot(Decoder decoder) const {
+    std::lock_guard<std::mutex> lk(allowed_tokens_mu_);
+    if (!allowed_tokens_.empty() &&
+        !(decoder == Decoder::kTDT ||
+          (decoder == Decoder::kDefault && arch_prefers_tdt(config().arch))))
+        throw std::invalid_argument("allowed tokens require offline TDT greedy decoding");
+    return allowed_tokens_;
+}
+
 std::unique_ptr<Model> Model::load(const std::string& gguf_path, const std::string& component) {
     // unique_ptr<Model> via private ctor: construct then load. We avoid
     // std::make_unique (private ctor) and never throw out of here.
@@ -268,7 +297,8 @@ static EncodedAudio encode_16k(const ModelLoader& loader,
 static std::string decode_enc_out(const ModelLoader& loader,
                                   const PredictionNet* dpred, const Joint* djoint,
                                   const std::vector<float>& enc_out,
-                                  int d_model, int Tout, bool use_tdt) {
+                                  int d_model, int Tout, bool use_tdt,
+                                  const std::vector<uint8_t>& allowed_tokens) {
     const ParakeetConfig& cfg = loader.config();
     if (use_tdt) {
         std::vector<float> enc_row((size_t)Tout * d_model);
@@ -281,7 +311,8 @@ static std::string decode_enc_out(const ModelLoader& loader,
         std::vector<int32_t> ids;
         if (!cfg.tdt_durations.empty())
             ids = tdt_greedy(pred, joint, enc_row, Tout, d_model,
-                             cfg.tdt_durations, (int)cfg.blank_id, max_symbols);
+                             cfg.tdt_durations, (int)cfg.blank_id, max_symbols,
+                             nullptr, allowed_tokens);
         else
             ids = rnnt_greedy(pred, joint, enc_row, Tout, d_model,
                               (int)cfg.blank_id, max_symbols);
@@ -300,6 +331,7 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
                                   Decoder decoder,
                                   const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    const auto allowed_tokens = allowed_tokens_snapshot(decoder);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
     EncodedAudio encoded = encode_16k(loader_, pcm16k, prompt_index);
@@ -312,7 +344,7 @@ std::string Model::transcribe_16k(const std::vector<float>& pcm16k,
                           use_tdt ? &decoder_objects().pred : nullptr,
                           use_tdt ? &decoder_objects().joint : nullptr,
                           encoded.channels_first,
-                          encoded.d_model, encoded.frames, use_tdt);
+                          encoded.d_model, encoded.frames, use_tdt, allowed_tokens);
 }
 
 void Model::transcribe_16k_ctc_logits(const std::vector<float>& pcm16k,
@@ -320,6 +352,7 @@ void Model::transcribe_16k_ctc_logits(const std::vector<float>& pcm16k,
                                       int& vocab_plus_1,
                                       const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    allowed_tokens_snapshot(Decoder::kCTC);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
 
@@ -474,6 +507,7 @@ std::string Model::transcribe_pcm_vad(const std::vector<float>& pcm, int sample_
     if (filter.active())
         return transcribe_pcm_vad_with_timestamps(pcm, sample_rate, decoder, target_lang, opts, external_vad, filter).text;
     PoolLease lease(pool_snapshot());
+    allowed_tokens_snapshot(decoder);
     if (!external_vad && !loader_.config().vad.present) throw std::runtime_error("model has no VAD head");
     const std::vector<float> pcm16k =
         sample_rate == 16000 ? pcm : resample_linear(pcm, sample_rate, 16000);
@@ -499,6 +533,7 @@ Transcription Model::transcribe_pcm_vad_with_timestamps(const std::vector<float>
                                                         const VadProbabilityFn* external_vad,
                                                         const WordFilter& filter) const {
     PoolLease lease(pool_snapshot());
+    allowed_tokens_snapshot(decoder);
     if (!external_vad && !loader_.config().vad.present) throw std::runtime_error("model has no VAD head");
     const std::vector<float> pcm16k =
         sample_rate == 16000 ? pcm : resample_linear(pcm, sample_rate, 16000);
@@ -614,6 +649,7 @@ std::vector<std::string> Model::transcribe_16k_batch(
     const std::vector<std::vector<float>>& pcms16k, Decoder decoder,
     const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    const auto allowed_tokens = allowed_tokens_snapshot(decoder);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
     const bool use_tdt = (decoder == Decoder::kTDT)
@@ -654,7 +690,7 @@ std::vector<std::string> Model::transcribe_16k_batch(
         std::vector<std::vector<int32_t>> ids;
         pk::transducer_greedy_batch(pred, joint, encs, Ts, d_model,
                                     cfg.tdt_durations, (int)cfg.blank_id,
-                                    (int)cfg.max_symbols, ids, nullptr);
+                                    (int)cfg.max_symbols, ids, nullptr, allowed_tokens);
         for (int b = 0; b < mb.B; ++b)
             outs[b] = detokenize(loader_.tokenizer_pieces(),
                                  strip_special_tokens(loader_.tokenizer_pieces(), ids[b]));
@@ -664,7 +700,7 @@ std::vector<std::string> Model::transcribe_16k_batch(
             outs[b] = decode_enc_out(loader_,
                                    use_tdt ? &decoder_objects().pred : nullptr,
                                    use_tdt ? &decoder_objects().joint : nullptr,
-                                   enc_outs[b], d_model, valid_Tout[b], use_tdt);
+                                   enc_outs[b], d_model, valid_Tout[b], use_tdt, allowed_tokens);
     }
     return outs;
 }
@@ -688,7 +724,8 @@ std::vector<std::string> Model::transcribe_pcm_batch(
 static Transcription decode_enc_out_with_timestamps(
         const ModelLoader& loader, const PredictionNet* dpred, const Joint* djoint,
         const std::vector<float>& enc_out,
-        int d_model, int Tout, bool use_tdt, float frame_sec) {
+        int d_model, int Tout, bool use_tdt, float frame_sec,
+        const std::vector<uint8_t>& allowed_tokens) {
     const ParakeetConfig& cfg = loader.config();
     Transcription result;
     std::vector<TokenInfo> toks;
@@ -702,7 +739,7 @@ static Transcription decode_enc_out_with_timestamps(
         const int max_symbols = (int)cfg.max_symbols;
         if (!cfg.tdt_durations.empty())
             tdt_greedy(pred, joint, enc_row, Tout, d_model, cfg.tdt_durations,
-                       (int)cfg.blank_id, max_symbols, &toks);
+                       (int)cfg.blank_id, max_symbols, &toks, allowed_tokens);
         else
             rnnt_greedy(pred, joint, enc_row, Tout, d_model,
                         (int)cfg.blank_id, max_symbols, &toks);
@@ -733,6 +770,7 @@ Transcription Model::transcribe_16k_with_timestamps(
     const std::vector<float>& pcm16k, Decoder decoder,
     const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    const auto allowed_tokens = allowed_tokens_snapshot(decoder);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
 
@@ -749,7 +787,7 @@ Transcription Model::transcribe_16k_with_timestamps(
     Transcription result = decode_enc_out_with_timestamps(
         loader_, use_tdt ? &decoder_objects().pred : nullptr,
         use_tdt ? &decoder_objects().joint : nullptr, encoded.channels_first, encoded.d_model, encoded.frames,
-        use_tdt, frame_sec);
+        use_tdt, frame_sec, allowed_tokens);
     return result;
 }
 
@@ -762,6 +800,7 @@ std::vector<Transcription> Model::transcribe_16k_grouped(
         const std::vector<const std::vector<float>*>& pcms16k, Decoder decoder,
         const std::string& target_lang, bool with_timestamps) const {
     PoolLease lease(pool_snapshot());
+    const auto allowed_tokens = allowed_tokens_snapshot(decoder);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
     const float frame_sec =
@@ -781,10 +820,10 @@ std::vector<Transcription> Model::transcribe_16k_grouped(
                 const EncodedAudio& e = enc[i - g0];
                 if (with_timestamps)
                     outs[i] = decode_enc_out_with_timestamps(loader_, nullptr, nullptr, e.channels_first,
-                                                             e.d_model, e.frames, false, frame_sec);
+                                                             e.d_model, e.frames, false, frame_sec, allowed_tokens);
                 else
                     outs[i].text = decode_enc_out(loader_, nullptr, nullptr, e.channels_first,
-                                                  e.d_model, e.frames, false);
+                                                  e.d_model, e.frames, false, allowed_tokens);
             }
             continue;
         }
@@ -800,7 +839,7 @@ std::vector<Transcription> Model::transcribe_16k_grouped(
         std::vector<std::vector<TokenInfo>> toks;
         pk::transducer_greedy_batch(decoder_objects().pred, decoder_objects().joint, encs, Ts, d_model,
                                     cfg.tdt_durations, (int)cfg.blank_id, (int)cfg.max_symbols, ids,
-                                    with_timestamps ? &toks : nullptr);
+                                    with_timestamps ? &toks : nullptr, allowed_tokens);
         for (size_t i = g0; i < g1; ++i) {
             const size_t k = i - g0;
             Transcription& r = outs[i];
@@ -819,6 +858,7 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
         const std::vector<std::vector<float>>& pcms16k, Decoder decoder,
         const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    const auto allowed_tokens = allowed_tokens_snapshot(decoder);
     const ParakeetConfig& cfg = loader_.config();
     const int prompt_index = resolve_prompt_index(target_lang);
     const float frame_sec =
@@ -859,7 +899,7 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
         std::vector<std::vector<TokenInfo>> toks;
         pk::transducer_greedy_batch(pred, joint, encs, Ts, d_model,
                                     cfg.tdt_durations, (int)cfg.blank_id,
-                                    (int)cfg.max_symbols, ids, &toks);
+                                    (int)cfg.max_symbols, ids, &toks, allowed_tokens);
         // Assemble each Transcription exactly as decode_enc_out_with_timestamps'
         // transducer tail does.
         for (int b = 0; b < mb.B; ++b) {
@@ -874,7 +914,7 @@ std::vector<Transcription> Model::transcribe_16k_batch_with_timestamps(
         for (int b = 0; b < mb.B; ++b)
             outs[b] = decode_enc_out_with_timestamps(
                 loader_, use_tdt ? &decoder_objects().pred : nullptr,
-                use_tdt ? &decoder_objects().joint : nullptr, enc_outs[b], d_model, valid_Tout[b], use_tdt, frame_sec);
+                use_tdt ? &decoder_objects().joint : nullptr, enc_outs[b], d_model, valid_Tout[b], use_tdt, frame_sec, allowed_tokens);
     }
     return outs;
 }
@@ -896,6 +936,7 @@ std::vector<NBestTranscription> Model::transcribe_16k_nbest(
         const std::vector<float>& pcm16k, int beam_size, int nbest,
         bool score_norm, const std::string& target_lang) const {
     PoolLease lease(pool_snapshot());
+    allowed_tokens_snapshot(Decoder::kCTC); // Beam search does not implement the mask.
     const ParakeetConfig& cfg = loader_.config();
 
     const int prompt_index = resolve_prompt_index(target_lang);

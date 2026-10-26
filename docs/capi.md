@@ -24,6 +24,23 @@ char *text = parakeet_capi_transcribe_pcm(ctx, samples, n_samples,
                                           sample_rate, 0 /*default*/);
 ```
 
+An offline TDT context can restrict greedy decoding with
+`parakeet_capi_set_allowed_tokens(ctx, ids, n)`. Build the id set from the UTF-8
+pieces returned by `parakeet_capi_token_piece(ctx, id)`; iterate ids below
+`parakeet_capi_vocab_size(ctx)`. That size is also the blank id; blank is always
+allowed, and its piece is `""`. Piece pointers are borrowed for the context's
+life. The set is copied, persists across calls, and applies to text, timestamped
+JSON, batch (including a batch of one), language and VAD paths. Duration logits
+are unchanged; confidence uses the masked token distribution.
+
+Pass NULL ids or n=0 to clear the set. Success returns 0; negative n or an id
+outside `[0, vocab_size]` returns nonzero with `last_error`, preserving the old
+set. CTC/RNNT-only, streaming and non-ASR contexts refuse this setter. On a TDT
+context with an active set, CTC, raw CTC logits and TDT beam search return an
+error; clear the set before using them. Configure while no request is running,
+as with `set_concurrency`; concurrent transcriptions may then share it. These
+three symbols are additive and keep ABI v10; FFI callers check symbol presence.
+
 Timestamps and confidence as JSON (matches NeMo `timestamps=True` + `max_prob`):
 ```c
 char *json = parakeet_capi_transcribe_path_json(ctx, "audio.wav", 0 /*default*/);

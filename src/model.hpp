@@ -145,6 +145,10 @@ public:
         const std::string& target_lang = "") const;
 
     const ParakeetConfig& config() const { return loader_.config(); }
+    // Offline TDT greedy only. Replaces the token set, or clears it when ids is
+    // null or n is zero. Throws on invalid ids/count or an unsupported model.
+    // Configure while no request is running; each decode snapshots the set.
+    void set_allowed_tokens(const int32_t* ids, int n);
     // Per-frame speech probability from the model's own VAD head (80 ms frames,
     // cfg.vad.frame_sec). `v` overrides the head wiring for experiments; nullptr
     // uses the defaults. Throws std::runtime_error if the model has no VAD head.
@@ -254,7 +258,12 @@ private:
     // Requests copy the pointer so a replaced pool outlives them.
     std::shared_ptr<BackendPool> pool_snapshot() const;
 
+    // Refuses other decoders while a mask is active instead of ignoring it.
+    std::vector<uint8_t> allowed_tokens_snapshot(Decoder decoder) const;
+
     ModelLoader loader_;
+    mutable std::mutex allowed_tokens_mu_;
+    std::vector<uint8_t> allowed_tokens_;
 
     // The transducer decoder objects, built once per model on first use
     // (thread-safe) so the 21 MB embedding table is not re-copied per

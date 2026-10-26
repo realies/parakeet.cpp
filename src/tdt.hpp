@@ -74,11 +74,15 @@ struct TdtBeamHypothesis {
 // the token slice logits[0:vocab+1] (excluding the TDT duration logits), span =
 // durations[d_k] (the predicted duration applied to the token). The id-only path
 // (tokens == nullptr) is unchanged.
+// `allowed_tokens`, when non-empty, has vocab+1 entries: zero excludes a token.
+// Blank is always allowed; duration logits are unaffected. Confidence uses the
+// masked token distribution (excluded tokens have zero probability).
 std::vector<int32_t> tdt_greedy(const PredictionNet& pred, const Joint& joint,
                                 const std::vector<float>& enc, int T, int enc_hidden,
                                 const std::vector<int32_t>& durations,
                                 int blank_id, int max_symbols,
-                                std::vector<TokenInfo>* tokens = nullptr);
+                                std::vector<TokenInfo>* tokens = nullptr,
+                                const std::vector<uint8_t>& allowed_tokens = {});
 
 // Sequence-level beam search for TDT models, matching NeMo BeamTDTInfer's
 // `default_beam_search`:
